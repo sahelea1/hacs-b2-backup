@@ -1,6 +1,4 @@
-"""Setup & Config-Entry-Lifecycle für b2_backup."""
 from __future__ import annotations
-
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
