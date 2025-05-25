@@ -22,7 +22,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 
 DOMAIN = "b2_backup"
-_DATA_LISTENERS = f"{DOMAIN}_listeners"
+DATA_BACKUP_AGENT_LISTENERS = f"{DOMAIN}_backup_agent_listeners"
 
 # Config keys
 CONF_KEY_ID = "application_key_id"
@@ -81,6 +81,7 @@ class B2BackupAgent(BackupAgent):
         **kwargs,
     ) -> None:
         """Upload a backup to B2."""
+        _LOGGER.info("Starting B2 backup upload for %s", backup.backup_id)
         await self._ensure_authorized()
         
         stream = await open_stream()
@@ -95,6 +96,7 @@ class B2BackupAgent(BackupAgent):
             return self._get_bucket().upload_bytes(buf.getvalue(), filename)
 
         await asyncio.get_running_loop().run_in_executor(None, _upload)
+        _LOGGER.info("Successfully uploaded backup %s to B2", backup.backup_id)
 
     async def async_list_backups(self, **kwargs) -> list[AgentBackup]:
         """List all backups in B2."""
@@ -115,6 +117,7 @@ class B2BackupAgent(BackupAgent):
                                 size=file_version.size,
                             )
                         )
+                _LOGGER.debug("Found %d backups in B2", len(backups))
             except Exception as err:
                 _LOGGER.error("Error listing B2 backups: %s", err)
                 raise
@@ -159,23 +162,42 @@ class B2BackupAgent(BackupAgent):
         await asyncio.get_running_loop().run_in_executor(None, _delete)
 
 
+# ============================================================================
 # Required functions for Home Assistant to discover backup agents
-async def async_get_backup_agents(hass: HomeAssistant) -> list[B2BackupAgent]:
-    """Return a list of backup agents."""
-    if not hass.config_entries.async_loaded_entries(DOMAIN):
-        _LOGGER.debug("No B2 backup config entry found or entry is not loaded")
+# ============================================================================
+
+async def async_get_backup_agents(hass: HomeAssistant) -> list[BackupAgent]:
+    """Return a list of backup agents.
+    
+    This function is called by Home Assistant to discover available backup agents.
+    """
+    _LOGGER.debug("async_get_backup_agents called for domain %s", DOMAIN)
+    
+    # Check if we have any loaded config entries for this domain
+    loaded_entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not loaded_entries:
+        _LOGGER.debug("No loaded config entries found for %s", DOMAIN)
         return []
     
     agents = []
-    for entry in hass.config_entries.async_entries(DOMAIN):
+    for entry in loaded_entries:
         if entry.state is ConfigEntryState.LOADED:
             try:
                 agent = B2BackupAgent(hass, entry.data)
                 agents.append(agent)
-                _LOGGER.info("Created B2 backup agent for bucket: %s", entry.data[CONF_BUCKET])
+                _LOGGER.info(
+                    "Created B2 backup agent '%s' for bucket: %s", 
+                    agent.unique_id, 
+                    entry.data[CONF_BUCKET]
+                )
             except Exception as err:
-                _LOGGER.error("Failed to create B2 backup agent for %s: %s", entry.data.get(CONF_BUCKET), err)
+                _LOGGER.error(
+                    "Failed to create B2 backup agent for %s: %s", 
+                    entry.data.get(CONF_BUCKET), 
+                    err
+                )
     
+    _LOGGER.info("Returning %d B2 backup agents", len(agents))
     return agents
 
 
@@ -186,25 +208,37 @@ def async_register_backup_agents_listener(
     listener: Callable[[], None],
     **kwargs: Any,
 ) -> Callable[[], None]:
-    """Register a listener to be called when agents are added or removed."""
-    hass.data.setdefault(_DATA_LISTENERS, []).append(listener)
+    """Register a listener to be called when agents are added or removed.
+    
+    This function is called by Home Assistant's backup manager to register
+    a callback that should be called whenever backup agents change.
+    """
+    _LOGGER.debug("Registering backup agents listener for %s", DOMAIN)
+    
+    # Initialize the listeners list if it doesn't exist
+    hass.data.setdefault(DATA_BACKUP_AGENT_LISTENERS, [])
+    hass.data[DATA_BACKUP_AGENT_LISTENERS].append(listener)
 
     @callback
     def remove_listener() -> None:
         """Remove the listener."""
-        if _DATA_LISTENERS in hass.data:
+        if DATA_BACKUP_AGENT_LISTENERS in hass.data:
             try:
-                hass.data[_DATA_LISTENERS].remove(listener)
+                hass.data[DATA_BACKUP_AGENT_LISTENERS].remove(listener)
+                _LOGGER.debug("Removed backup agents listener for %s", DOMAIN)
             except ValueError:
-                pass
+                _LOGGER.warning("Listener not found in list for %s", DOMAIN)
 
     return remove_listener
 
 
-def async_on_config_entry_changed(hass: HomeAssistant) -> None:
-    """Called when config entries change to notify listeners."""
-    for callback_func in hass.data.get(_DATA_LISTENERS, []):
+def notify_backup_listeners(hass: HomeAssistant) -> None:
+    """Notify all registered backup listeners that agents may have changed."""
+    listeners = hass.data.get(DATA_BACKUP_AGENT_LISTENERS, [])
+    _LOGGER.debug("Notifying %d backup listeners for %s", len(listeners), DOMAIN)
+    
+    for listener in listeners:
         try:
-            callback_func()
+            listener()
         except Exception as err:
             _LOGGER.error("Error calling backup agent listener: %s", err)
