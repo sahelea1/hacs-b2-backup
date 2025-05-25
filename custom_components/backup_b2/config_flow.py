@@ -45,18 +45,23 @@ class B2BackupConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.hass.async_add_executor_job(
                     self._validate_credentials, user_input
                 )
-            except Exception:
-                _LOGGER.exception("Unexpected error validating credentials")
-                errors["base"] = "unknown"
-            else:
-                # Check if already configured
+                
+                # Check if already configured for this bucket
                 await self.async_set_unique_id(user_input[CONF_BUCKET])
                 self._abort_if_unique_id_configured()
 
+                _LOGGER.info("Creating B2 backup config entry for bucket: %s", user_input[CONF_BUCKET])
                 return self.async_create_entry(
                     title=f"Backblaze B2 ({user_input[CONF_BUCKET]})",
                     data=user_input,
                 )
+                
+            except ValueError as err:
+                _LOGGER.error("B2 credentials validation failed: %s", err)
+                errors["base"] = "invalid_auth"
+            except Exception as err:
+                _LOGGER.exception("Unexpected error validating B2 credentials: %s", err)
+                errors["base"] = "unknown"
 
         data_schema = vol.Schema(
             {
@@ -75,15 +80,21 @@ class B2BackupConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     def _validate_credentials(self, data: dict[str, Any]) -> None:
-        """Validate the user credentials."""
+        """Validate the user credentials and bucket access."""
         try:
+            # Test B2 API authorization
             api = B2Api(InMemoryAccountInfo())
             api.authorize_account(
                 data[CONF_ENDPOINT], data[CONF_KEY_ID], data[CONF_KEY]
             )
+            
+            # Test bucket access
             bucket = api.get_bucket_by_name(data[CONF_BUCKET])
             if bucket is None:
-                raise ValueError("Bucket not found")
+                raise ValueError(f"Bucket '{data[CONF_BUCKET]}' not found or not accessible")
+                
+            _LOGGER.info("Successfully validated B2 credentials and bucket access")
+            
         except Exception as err:
-            _LOGGER.error("Failed to validate B2 credentials: %s", err)
-            raise
+            _LOGGER.error("B2 validation failed: %s", err)
+            raise ValueError("Failed to connect to B2 or access bucket") from err
