@@ -18,11 +18,11 @@ from homeassistant.components.backup import (
     BackupAgent,
     BackupNotFound,
 )
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import HomeAssistant, callback
 
 DOMAIN = "b2_backup"
+_DATA_LISTENERS = f"{DOMAIN}_listeners"
 
 # Config keys
 CONF_KEY_ID = "application_key_id"
@@ -39,29 +39,31 @@ class B2BackupAgent(BackupAgent):
 
     domain = DOMAIN
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, config: dict[str, Any]) -> None:
         """Initialize the B2 backup agent."""
         self.hass = hass
-        self._entry = entry
-        self._bucket_name = entry.data[CONF_BUCKET]
-        self._prefix = entry.data.get(CONF_PREFIX, "ha-backup")
+        self._bucket_name = config[CONF_BUCKET]
+        self._prefix = config.get(CONF_PREFIX, "ha-backup")
         self.name = f"Backblaze B2 ({self._bucket_name})"
-        self.unique_id = f"{DOMAIN}_{entry.entry_id}"
+        self.unique_id = f"{DOMAIN}_{self._bucket_name}"
 
         # Initialize B2 API
         info = InMemoryAccountInfo()
         self._api = B2Api(info)
         self._bucket_obj = None
         self._authorized = False
+        
+        # Store config for authorization
+        self._config = config
 
     async def _ensure_authorized(self) -> None:
         """Ensure the B2 API is authorized."""
         if not self._authorized:
             await self.hass.async_add_executor_job(
                 self._api.authorize_account,
-                self._entry.data.get(CONF_ENDPOINT, "production"),
-                self._entry.data[CONF_KEY_ID],
-                self._entry.data[CONF_KEY],
+                self._config.get(CONF_ENDPOINT, "production"),
+                self._config[CONF_KEY_ID],
+                self._config[CONF_KEY],
             )
             self._authorized = True
 
@@ -157,18 +159,52 @@ class B2BackupAgent(BackupAgent):
         await asyncio.get_running_loop().run_in_executor(None, _delete)
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Set up B2 backup platform."""
-    # Create the backup agent
-    agent = B2BackupAgent(hass, entry)
+# Required functions for Home Assistant to discover backup agents
+async def async_get_backup_agents(hass: HomeAssistant) -> list[B2BackupAgent]:
+    """Return a list of backup agents."""
+    if not hass.config_entries.async_loaded_entries(DOMAIN):
+        _LOGGER.debug("No B2 backup config entry found or entry is not loaded")
+        return []
     
-    # Register the backup agent with the backup component
-    backup_component = hass.data.get("backup")
-    if backup_component is not None:
-        await backup_component.async_add_backup_agent(agent)
-    else:
-        _LOGGER.error("Backup component not found")
+    agents = []
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.state is ConfigEntryState.LOADED:
+            try:
+                agent = B2BackupAgent(hass, entry.data)
+                agents.append(agent)
+                _LOGGER.info("Created B2 backup agent for bucket: %s", entry.data[CONF_BUCKET])
+            except Exception as err:
+                _LOGGER.error("Failed to create B2 backup agent for %s: %s", entry.data.get(CONF_BUCKET), err)
+    
+    return agents
+
+
+@callback
+def async_register_backup_agents_listener(
+    hass: HomeAssistant,
+    *,
+    listener: Callable[[], None],
+    **kwargs: Any,
+) -> Callable[[], None]:
+    """Register a listener to be called when agents are added or removed."""
+    hass.data.setdefault(_DATA_LISTENERS, []).append(listener)
+
+    @callback
+    def remove_listener() -> None:
+        """Remove the listener."""
+        if _DATA_LISTENERS in hass.data:
+            try:
+                hass.data[_DATA_LISTENERS].remove(listener)
+            except ValueError:
+                pass
+
+    return remove_listener
+
+
+def async_on_config_entry_changed(hass: HomeAssistant) -> None:
+    """Called when config entries change to notify listeners."""
+    for callback_func in hass.data.get(_DATA_LISTENERS, []):
+        try:
+            callback_func()
+        except Exception as err:
+            _LOGGER.error("Error calling backup agent listener: %s", err)
