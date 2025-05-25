@@ -1,11 +1,12 @@
 {
   "domain": "b2_backup",
   "name": "Backblaze B2 Backup",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "documentation": "https://github.com/sahelea1/hacs-b2-backup",
-  "requirements": ["b2sdk>=1.23.0"],
+  "requirements": ["b2sdk>=2.0.0"],
   "after_dependencies": ["backup"],
   "codeowners": ["@sahelea1"],
   "config_flow": true,
-  "integration_type": "service"
+  "integration_type": "service",
+  "iot_class": "cloud_push"
 }
