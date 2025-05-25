@@ -1,4 +1,4 @@
-"""Backblaze B2 – Backup-Agent + Hooks für Home-Assistant-Backup."""
+from homeassistant.config_entries import ConfigEntryState
 from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Coroutine
